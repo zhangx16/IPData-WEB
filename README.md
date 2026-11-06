@@ -2,6 +2,12 @@
 
 参考 [PoemMisty/CFData-WEB](https://github.com/PoemMisty/CFData-WEB) 的优选流程，新建的独立 Go 云厂商 IP 优选项目。已移除原 CFData 功能和兼容入口。Go 标准库实现，无第三方运行时依赖，提供 Web 与 CLI。
 
+## Windows 便携软件
+
+[下载 Windows 版本](https://github.com/zhangx16/IPData-WEB/releases/latest)。普通Intel/AMD电脑选择amd64 ZIP，Windows ARM电脑选择arm64 ZIP；完整解压后双击`IPData-WEB.exe`，自动打开本地测试界面，无需安装Go、Python或Node。
+
+Windows任务保存在EXE旁的`ipdata-tasks`，支持暂停续扫与重启恢复；默认端口占用会自动换用可用本地端口。退出建议先暂停任务再在控制台按Ctrl+C。详见[Windows使用说明](docs/windows.md)。
+
 ## 构建与启动
 
 需要 Go 1.23+：
@@ -77,6 +83,8 @@ python3 tools/update_dmit.py
 2026-11-06获取的查询窗口为2026-10-23至2026-11-06，合并后39个IPv4网段（83968地址）、9个IPv6网段。这是窗口内观察到的BGP公告，不是实时设备清单、全部资产清单或扫描授权。
 
 [data-sources/](data-sources/) 同时保存用户提供的46段原清单和来源差异；原清单共91136地址，两个端口为182272个候选，超过单任务上限。部分网段未被此次数据完整覆盖，不将它们自动当成当前AS906资产。
+
+三个用户指定IP的CF与完整VLESS链路实测结果见[指定节点测试报告](docs/supplied-node-test-2026-11-06.md)，其中节点凭据已省略。
 
 ## 探测证据
 

@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,9 +23,18 @@ import (
 //go:embed cloud.html
 var page string
 
+var buildVersion = "dev"
+var buildCommit = "unknown"
+var desktopErrors bool
+
 func main() {
+	setupConsole()
 	if e := run(); e != nil {
-		log.Fatal(e)
+		log.Print(e)
+		if desktopErrors {
+			showStartupError(e)
+		}
+		os.Exit(1)
 	}
 }
 func run() error {
@@ -33,7 +44,13 @@ func run() error {
 	file := flag.String("file", "", "IP/CIDR文本文件")
 	out := flag.String("out", "results.jsonl", "CLI结果导出路径")
 	format := flag.String("format", "jsonl", "jsonl 或 csv")
-	dir := flag.String("data", "ipdata-tasks", "持久化任务目录（同一时刻只允许一个进程使用）")
+	executable, e := os.Executable()
+	if e != nil {
+		return e
+	}
+	dir := flag.String("data", defaultDataDirectory(executable, runtime.GOOS), "持久化任务目录（Windows默认程序所在目录；同一时刻只允许一个进程使用）")
+	autoOpen := flag.Bool("open", runtime.GOOS == "windows", "启动Web后自动打开默认浏览器；CLI模式忽略")
+	version := flag.Bool("version", false, "显示版本与构建信息后退出")
 	resume := flag.String("resume", "", "继续已有任务ID（沿用原配置）")
 	name := flag.String("name", "", "任务名称")
 	list := flag.Bool("tasks", false, "列出持久化任务并退出")
@@ -51,9 +68,14 @@ func run() error {
 	flag.Int64Var(&c.SpeedBytes, "speed-bytes", c.SpeedBytes, "每个通过Trace的目标最多下载字节数")
 	flag.IntVar(&c.SpeedTimeout, "speed-timeout", c.SpeedTimeout, "单次测速超时毫秒")
 	flag.Parse()
+	if *version {
+		fmt.Printf("IPData-WEB %s (%s) %s/%s\n", buildVersion, buildCommit, runtime.GOOS, runtime.GOARCH)
+		return nil
+	}
+	desktopErrors = runtime.GOOS == "windows" && !*cli && !*list
 	m, e := newManager(*dir)
 	if e != nil {
-		return e
+		return fmt.Errorf("无法打开任务目录 %s：%w；请选择可写入的解压目录，或通过 -data 指定目录", *dir, e)
 	}
 	defer m.close()
 	if *list {
@@ -131,10 +153,27 @@ func run() error {
 		}
 		return nil
 	}
-	s := &http.Server{Addr: *bind, Handler: api(m), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32768}
+	explicitListen := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "listen" {
+			explicitListen = true
+		}
+	})
+	listener, e := listenForApp(*bind, runtime.GOOS == "windows" && !explicitListen)
+	if e != nil {
+		return fmt.Errorf("无法监听 %s：%w", *bind, e)
+	}
+	defer listener.Close()
+	url := browserURL(listener.Addr())
+	s := &http.Server{Addr: listener.Addr().String(), Handler: api(m), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32768}
 	errCh := make(chan error, 1)
-	go func() { errCh <- s.ListenAndServe() }()
-	log.Printf("IPData-WEB http://%s；任务保存在 %s，网页关闭后任务继续运行", *bind, *dir)
+	go func() { errCh <- s.Serve(listener) }()
+	log.Printf("IPData-WEB %s %s；任务保存在 %s，网页关闭后任务继续运行", buildVersion, url, *dir)
+	if *autoOpen {
+		if e := openBrowser(url); e != nil {
+			log.Printf("%v；请手动打开 %s", e, url)
+		}
+	}
 	if !strings.HasPrefix(*bind, "127.0.0.1:") {
 		log.Print("Web无登录认证，请在可信网络或认证反向代理后使用")
 	}
@@ -151,6 +190,14 @@ func run() error {
 		}
 	}
 	return nil
+}
+
+func listenForApp(address string, fallback bool) (net.Listener, error) {
+	l, e := net.Listen("tcp", address)
+	if e != nil && fallback {
+		return net.Listen("tcp", "127.0.0.1:0")
+	}
+	return l, e
 }
 func csvSafe(s string) string {
 	if len(s) > 0 && strings.ContainsRune("=+-@\t\r\n", rune(s[0])) {
