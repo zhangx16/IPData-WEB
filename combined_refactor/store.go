@@ -18,18 +18,19 @@ import (
 )
 
 type Task struct {
-	HasTemplate bool     `json:"has_vless_template,omitempty"`
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Config      Config   `json:"config"`
-	Status      string   `json:"status"`
-	Created     string   `json:"created"`
-	Updated     string   `json:"updated"`
-	Total       int      `json:"total"`
-	Completed   int      `json:"completed"`
-	Hits        int      `json:"hits"`
-	Error       string   `json:"error,omitempty"`
-	Results     []Result `json:"-"`
+	HasTemplate  bool     `json:"has_vless_template,omitempty"`
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Config       Config   `json:"config"`
+	Status       string   `json:"status"`
+	Created      string   `json:"created"`
+	Updated      string   `json:"updated"`
+	Total        int      `json:"total"`
+	Completed    int      `json:"completed"`
+	Hits         int      `json:"hits"`
+	DownloadHits int      `json:"download_hits"`
+	Error        string   `json:"error,omitempty"`
+	Results      []Result `json:"-"`
 }
 type taskManager struct {
 	mu     sync.Mutex
@@ -139,9 +140,13 @@ func loadJournal(path string, t *Task) error {
 	}
 	t.Completed = len(t.Results)
 	t.Hits = 0
+	t.DownloadHits = 0
 	for _, r := range t.Results {
 		if resultHit(r) {
 			t.Hits++
+		}
+		if downloadSucceeded(r) {
+			t.DownloadHits++
 		}
 	}
 	return nil
@@ -314,6 +319,9 @@ func (m *taskManager) start(id string) error {
 			t.Completed++
 			if resultHit(r) {
 				t.Hits++
+			}
+			if downloadSucceeded(r) {
+				t.DownloadHits++
 			}
 			t.Updated = time.Now().UTC().Format(time.RFC3339Nano)
 		}

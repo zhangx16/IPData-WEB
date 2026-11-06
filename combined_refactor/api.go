@@ -19,12 +19,32 @@ func jsonReply(w http.ResponseWriter, v any) {
 func api(m *taskManager) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
+		var asset, contentType string
+		switch r.URL.Path {
+		case "/":
+			asset = "cloud.html"
+			contentType = "text/html; charset=utf-8"
+		case "/app.css":
+			asset = "app.css"
+			contentType = "text/css; charset=utf-8"
+		case "/app.js":
+			asset = "app.js"
+			contentType = "text/javascript; charset=utf-8"
+		default:
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, page)
+		if r.Method != "GET" && r.Method != "HEAD" {
+			http.Error(w, "GET required", 405)
+			return
+		}
+		data, e := appAssets.ReadFile(asset)
+		if e != nil {
+			http.Error(w, "UI asset missing", 500)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write(data)
 	})
 	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -141,6 +161,56 @@ func api(m *taskManager) http.Handler {
 				w.Header().Set("Content-Type", "application/json")
 			}
 			_ = writeResults(w, rs, format)
+		case "export-vless":
+			if r.Method != "POST" {
+				http.Error(w, "POST required", 405)
+				return
+			}
+			var q nodeExportRequest
+			if e := decodeBody(w, r, &q); e != nil {
+				http.Error(w, e.Error(), 400)
+				return
+			}
+			if e := validExportRequest(q); e != nil {
+				http.Error(w, e.Error(), 400)
+				return
+			}
+			m.mu.Lock()
+			t := m.tasks[id]
+			if t == nil {
+				m.mu.Unlock()
+				http.NotFound(w, r)
+				return
+			}
+			candidates := collectNodeCandidates(t.Results, q)
+			saved := t.Config.NodeTemplate
+			m.mu.Unlock()
+			if q.Preview {
+				jsonReply(w, map[string]any{"count": len(candidates), "has_saved_template": saved != ""})
+				return
+			}
+			if len(candidates) == 0 {
+				http.Error(w, "没有下载测速成功且匹配导出范围的结果", 400)
+				return
+			}
+			raw := q.Template
+			if q.TemplateSource == "saved" || q.TemplateSource == "" && raw == "" {
+				raw = saved
+			}
+			if raw == "" {
+				http.Error(w, "请粘贴VLESS模板，或选择任务已保存的模板", 400)
+				return
+			}
+			base, e := parseExportTemplate(raw)
+			if e != nil {
+				http.Error(w, e.Error(), 400)
+				return
+			}
+			appendAddress := q.Rename == nil || *q.Rename
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=ipdata-vless-%s.txt", id))
+			w.Header().Set("X-IPData-Node-Count", strconv.Itoa(len(candidates)))
+			_ = writeNodeLinks(w, base, candidates, appendAddress)
 		default:
 			http.NotFound(w, r)
 		}
@@ -148,7 +218,7 @@ func api(m *taskManager) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
-		if r.Method != "GET" {
+		if r.Method != "GET" && r.Method != "HEAD" {
 			if r.Header.Get("Content-Type") != "application/json" {
 				http.Error(w, "application/json required", 415)
 				return

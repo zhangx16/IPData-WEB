@@ -1,4 +1,4 @@
-# Windows 便携版 v0.3.0
+# Windows 便携版 v0.4.0
 
 提供Windows 10/11普通Intel/AMD 64位（amd64）和Windows ARM64包。内嵌本地网页与VLESS客户端，无需安装Go、Python、Node、sing-box或Xray。
 
@@ -12,6 +12,14 @@
 6. 点击结果IP:端口可复制**纯IP**，IPv6不含方括号和端口。点击行其他位置查看逐次证据。
 
 `one.one.one.one`是CF第二个测试域名，并不是节点SNI。VLESS真连接会自动使用模板里的SNI/Host/路径；选仅测VLESS时，两个CF域名框禁用。美国出口模板也可以测试其他地区入口，出口仍由业务后端决定。
+
+## 下载成功结果导出节点
+
+结果区点击“导出 VLESS 节点”。默认可使用此任务已保存模板；CF-only任务或需要更换模板时，粘贴其他VLESS链接。选择当前筛选/勾选/任务全部下载成功项后下载TXT，软件自动替换候选IP和端口，保留UUID和查询参数，可导入v2rayN等客户端。
+
+失败或没有有效下载数据的结果不能勾选导出。全选当前页最多500行；导出当前筛选或任务全部成功项不受显示行数限制。IPv6格式自动处理；模板输入关闭后清空。
+
+**节点TXT含认证凭据，请自行保存；普通结果CSV/JSON不含模板。** 自定义导出模板不会改写任务模板，也不重新验证业务连接。
 
 ## 规模与限速
 
@@ -49,9 +57,9 @@ CSV/JSON保存在浏览器下载目录。接口与界面隐藏模板，打开历
 开发机需要Go和Python3，软件用户不需要：
 
 ```sh
-python3 tools/build_windows.py --version v0.3.0
+python3 tools/build_windows.py --version v0.4.0
 ```
 
-输出`release_assets/windows-v0.3.0/`内含两种架构EXE、ZIP、SHA256校验和及源码构建清单。内置依赖许可在`THIRD_PARTY_NOTICES.md`。
+输出`release_assets/windows-v0.4.0/`内含两种架构EXE、ZIP、SHA256校验和及源码构建清单。内置依赖许可在`THIRD_PARTY_NOTICES.md`。
 
 已覆盖Linux功能与竞态检测、真实TLS/WS/VLESS协议、错误UUID、证书检查、暂停/重启恢复、浏览器复制及Windows交叉构建；当前未在原生Windows电脑上完成实机验证。

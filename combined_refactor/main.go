@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
@@ -20,8 +20,8 @@ import (
 	"time"
 )
 
-//go:embed cloud.html
-var page string
+//go:embed cloud.html app.css app.js
+var appAssets embed.FS
 
 var buildVersion = "dev"
 var buildCommit = "unknown"
