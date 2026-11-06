@@ -18,17 +18,18 @@ import (
 )
 
 type Task struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	Config    Config   `json:"config"`
-	Status    string   `json:"status"`
-	Created   string   `json:"created"`
-	Updated   string   `json:"updated"`
-	Total     int      `json:"total"`
-	Completed int      `json:"completed"`
-	Hits      int      `json:"hits"`
-	Error     string   `json:"error,omitempty"`
-	Results   []Result `json:"-"`
+	HasTemplate bool     `json:"has_vless_template,omitempty"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Config      Config   `json:"config"`
+	Status      string   `json:"status"`
+	Created     string   `json:"created"`
+	Updated     string   `json:"updated"`
+	Total       int      `json:"total"`
+	Completed   int      `json:"completed"`
+	Hits        int      `json:"hits"`
+	Error       string   `json:"error,omitempty"`
+	Results     []Result `json:"-"`
 }
 type taskManager struct {
 	mu     sync.Mutex
@@ -56,7 +57,7 @@ func newManager(dir string) (*taskManager, error) {
 			unlock()
 		}
 	}()
-	m := &taskManager{dir: dir, tasks: map[string]*Task{}, runner: scan, unlock: unlock}
+	m := &taskManager{dir: dir, tasks: map[string]*Task{}, unlock: unlock}
 	paths, e := filepath.Glob(filepath.Join(dir, "*.json"))
 	if e != nil {
 		return nil, e
@@ -139,7 +140,7 @@ func loadJournal(path string, t *Task) error {
 	t.Completed = len(t.Results)
 	t.Hits = 0
 	for _, r := range t.Results {
-		if r.Success > 0 {
+		if resultHit(r) {
 			t.Hits++
 		}
 	}
@@ -178,7 +179,10 @@ func (m *taskManager) saveLocked(t *Task) error {
 	return nil
 }
 func (m *taskManager) create(name string, c Config) (Task, error) {
-	targets, e := prepare(c)
+	if scanMode(c) == "cf" {
+		c.NodeTemplate = ""
+	}
+	plan, e := planTargets(c)
 	if e != nil {
 		return Task{}, e
 	}
@@ -189,7 +193,7 @@ func (m *taskManager) create(name string, c Config) (Task, error) {
 	if _, e = rand.Read(b); e != nil {
 		return Task{}, e
 	}
-	t := &Task{ID: hex.EncodeToString(b), Name: strings.TrimSpace(name), Config: c, Status: "paused", Created: time.Now().UTC().Format(time.RFC3339Nano), Total: len(targets), Results: []Result{}}
+	t := &Task{ID: hex.EncodeToString(b), Name: strings.TrimSpace(name), Config: c, Status: "paused", Created: time.Now().UTC().Format(time.RFC3339Nano), Total: plan.Count, Results: []Result{}}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -201,7 +205,13 @@ func (m *taskManager) create(name string, c Config) (Task, error) {
 	m.tasks[t.ID] = t
 	return taskCopy(t), nil
 }
-func taskCopy(t *Task) Task { v := *t; v.Results = nil; return v }
+func taskCopy(t *Task) Task {
+	v := *t
+	v.Results = nil
+	v.HasTemplate = t.Config.NodeTemplate != ""
+	v.Config.NodeTemplate = ""
+	return v
+}
 func (m *taskManager) list() []Task {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -245,7 +255,7 @@ func (m *taskManager) start(id string) error {
 	if t.Status == "completed" {
 		return fmt.Errorf("任务已完成")
 	}
-	targets, e := prepare(t.Config)
+	plan, e := planTargets(t.Config)
 	if e != nil {
 		return e
 	}
@@ -253,11 +263,15 @@ func (m *taskManager) start(id string) error {
 	for _, r := range t.Results {
 		seen[key(r.IP, r.Port)] = true
 	}
-	pending := make([]Target, 0, len(targets))
-	for _, v := range targets {
-		if !seen[key(v.IP, v.Port)] {
-			pending = append(pending, v)
-		}
+	override := m.runner
+	var pending []Target
+	if override != nil {
+		plan.each(func(v Target) bool {
+			if !seen[key(v.IP, v.Port)] {
+				pending = append(pending, v)
+			}
+			return true
+		})
 	}
 	f, e := os.OpenFile(filepath.Join(m.dir, id+".jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if e != nil {
@@ -278,7 +292,7 @@ func (m *taskManager) start(id string) error {
 		defer m.wg.Done()
 		defer cancel()
 		var failure error
-		m.runner(ctx, t.Config, pending, func(r Result) {
+		emit := func(r Result) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			if failure != nil {
@@ -298,11 +312,16 @@ func (m *taskManager) start(id string) error {
 			}
 			t.Results = append(t.Results, r)
 			t.Completed++
-			if r.Success > 0 {
+			if resultHit(r) {
 				t.Hits++
 			}
 			t.Updated = time.Now().UTC().Format(time.RFC3339Nano)
-		})
+		}
+		if override != nil {
+			override(ctx, t.Config, pending, emit)
+		} else {
+			scanTargetPlan(ctx, t.Config, plan, seen, emit)
+		}
 		closeErr := f.Close()
 		m.mu.Lock()
 		defer m.mu.Unlock()

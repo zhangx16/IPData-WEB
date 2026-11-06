@@ -1,7 +1,6 @@
 package main
 
 import (
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +10,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-//go:embed dmit.json
-var dmitData []byte
 
 func jsonReply(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -29,14 +25,6 @@ func api(m *taskManager) http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, page)
-	})
-	mux.HandleFunc("/api/providers/dmit", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "GET" {
-			http.Error(w, "GET required", 405)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(dmitData)
 	})
 	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -174,7 +162,7 @@ func api(m *taskManager) http.Handler {
 	})
 }
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<20))
 	d.DisallowUnknownFields()
 	if e := d.Decode(v); e != nil {
 		return e

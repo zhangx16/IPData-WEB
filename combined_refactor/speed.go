@@ -14,6 +14,7 @@ import (
 )
 
 type SpeedResult struct {
+	Via     string  `json:"via,omitempty"`
 	URL     string  `json:"url"`
 	SNI     string  `json:"sni"`
 	Bytes   int64   `json:"bytes"`
@@ -31,6 +32,7 @@ func speedWithDial(ctx context.Context, t Target, c Config, dial func(context.Co
 	start := time.Now()
 	defer func() { out.TotalMS = float64(time.Since(start).Microseconds()) / 1000 }()
 	out.URL = c.SpeedURL
+	out.Via = "candidate_https"
 	u, e := url.Parse(c.SpeedURL)
 	if e != nil {
 		out.Error = e.Error()

@@ -54,12 +54,18 @@ func run() error {
 	resume := flag.String("resume", "", "继续已有任务ID（沿用原配置）")
 	name := flag.String("name", "", "任务名称")
 	list := flag.Bool("tasks", false, "列出持久化任务并退出")
+	nodeFile := flag.String("vless-file", "", "CLI模式从UTF-8文件读取VLESS模板，避免凭据出现在命令参数中")
+	speedEnabled := flag.Bool("speed", false, "启用下载测速；false表示仅测连通性")
+	flag.StringVar(&c.Mode, "mode", "cf", "测试模式：cf、combined（CF后验证VLESS）、vless（仅真连接）")
+	flag.StringVar(&c.NodeCheckURL, "node-check-url", c.NodeCheckURL, "VLESS通道内的HTTPS真连接测试地址")
+	flag.IntVar(&c.NodeTimeout, "node-timeout", c.NodeTimeout, "VLESS每轮真连接超时毫秒")
 	flag.StringVar(&c.Targets, "targets", "", "IP/CIDR，逗号分隔")
 	flag.StringVar(&c.Ports, "ports", c.Ports, "端口")
 	flag.StringVar(&c.SNI, "sni", c.SNI, "SNI及Host")
 	flag.StringVar(&c.VerifySNI, "verify-sni", c.VerifySNI, "第二域名，空值关闭")
 	flag.IntVar(&c.Concurrency, "concurrency", c.Concurrency, "并发")
-	flag.IntVar(&c.Rate, "rate", c.Rate, "每秒请求上限")
+	flag.IntVar(&c.Rate, "rate", c.Rate, "每秒请求数（0不限速，无固定数值上限）")
+	flag.IntVar(&c.MaxTargets, "max-targets", c.MaxTargets, "任务目标数上限（IP×端口），可自行提高")
 	flag.IntVar(&c.Timeout, "timeout", c.Timeout, "请求超时毫秒")
 	flag.IntVar(&c.Rounds, "rounds", c.Rounds, "重复轮数")
 	flag.BoolVar(&c.Insecure, "insecure", false, "关闭证书校验，仅作特征探测")
@@ -68,6 +74,14 @@ func run() error {
 	flag.Int64Var(&c.SpeedBytes, "speed-bytes", c.SpeedBytes, "每个通过Trace的目标最多下载字节数")
 	flag.IntVar(&c.SpeedTimeout, "speed-timeout", c.SpeedTimeout, "单次测速超时毫秒")
 	flag.Parse()
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "speed" {
+			c.SpeedEnabled = speedEnabled
+		}
+	})
+	if wantSpeed(c) && c.SpeedURL == "" {
+		c.SpeedURL = fmt.Sprintf("https://speed.cloudflare.com/__down?bytes=%d", c.SpeedBytes)
+	}
 	if *version {
 		fmt.Printf("IPData-WEB %s (%s) %s/%s\n", buildVersion, buildCommit, runtime.GOOS, runtime.GOARCH)
 		return nil
@@ -89,6 +103,13 @@ func run() error {
 		}
 		id := *resume
 		if id == "" {
+			if *nodeFile != "" {
+				b, e := os.ReadFile(*nodeFile)
+				if e != nil {
+					return e
+				}
+				c.NodeTemplate = strings.TrimSpace(strings.TrimPrefix(string(b), "\ufeff"))
+			}
 			if *file != "" {
 				b, e := os.ReadFile(*file)
 				if e != nil {
@@ -101,8 +122,8 @@ func run() error {
 				return e
 			}
 			id = t.ID
-		} else if *file != "" || c.Targets != "" {
-			return fmt.Errorf("resume沿用原配置，请勿同时传入file或targets")
+		} else if *file != "" || c.Targets != "" || *nodeFile != "" {
+			return fmt.Errorf("resume沿用原配置，请勿同时传入file、targets或vless-file")
 		}
 		log.Printf("任务ID %s；Ctrl+C暂停；继续：-cli -data %s -resume %s", id, *dir, id)
 		if e = m.start(id); e != nil {
@@ -219,7 +240,7 @@ func writeResults(w io.Writer, rs []Result, format string) error {
 		return nil
 	}
 	cw := csv.NewWriter(w)
-	if e := cw.Write([]string{"ip", "port", "provider", "evidence", "success", "rounds", "median_ms", "speed_mbps", "speed_bytes", "speed_error"}); e != nil {
+	if e := cw.Write([]string{"ip", "port", "provider", "evidence", "success", "rounds", "median_ms", "speed_mbps", "speed_bytes", "speed_error", "speed_via", "vless_success", "vless_rounds", "vless_median_ms"}); e != nil {
 		return e
 	}
 	for _, r := range rs {
@@ -229,7 +250,16 @@ func writeResults(w io.Writer, rs []Result, format string) error {
 			n = strconv.FormatInt(r.Speed.Bytes, 10)
 			se = r.Speed.Error
 		}
-		if e := cw.Write([]string{r.IP, strconv.Itoa(r.Port), csvSafe(r.Provider), r.Evidence, strconv.Itoa(r.Success), strconv.Itoa(r.Rounds), fmt.Sprintf("%.2f", r.Median), mbps, n, csvSafe(se)}); e != nil {
+		via, ns, nr, nm := "", "", "", ""
+		if r.Speed != nil {
+			via = r.Speed.Via
+		}
+		if r.Node != nil {
+			ns = strconv.Itoa(r.Node.Success)
+			nr = strconv.Itoa(r.Node.Rounds)
+			nm = fmt.Sprintf("%.2f", r.Node.Median)
+		}
+		if e := cw.Write([]string{r.IP, strconv.Itoa(r.Port), csvSafe(r.Provider), r.Evidence, strconv.Itoa(r.Success), strconv.Itoa(r.Rounds), fmt.Sprintf("%.2f", r.Median), mbps, n, csvSafe(se), via, ns, nr, nm}); e != nil {
 			return e
 		}
 	}

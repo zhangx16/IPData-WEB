@@ -14,7 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--version', default='v0.2.0')
+    ap.add_argument('--version', default='v0.3.0')
     ap.add_argument('--arch', nargs='+', choices=['amd64', 'arm64'], default=['amd64', 'arm64'])
     args = ap.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', args.version):
@@ -57,6 +57,7 @@ def main():
             z.writestr(folder + 'README-Windows.txt', ('\ufeff' + readme).encode('utf-8'))
             z.write(ROOT / 'docs/windows.md', folder + 'windows.md')
             z.write(ROOT / 'LICENSE', folder + 'LICENSE')
+            z.write(ROOT / 'THIRD_PARTY_NOTICES.md', folder + 'THIRD_PARTY_NOTICES.md')
             z.writestr(folder + 'build-info.json', json.dumps(package_info, indent=2) + '\n')
         with zipfile.ZipFile(package) as z:
             if z.testzip() is not None:

@@ -18,6 +18,12 @@ import (
 )
 
 type Config struct {
+	MaxTargets   int    `json:"max_targets,omitempty"`
+	Mode         string `json:"mode,omitempty"`
+	NodeTemplate string `json:"vless_template,omitempty"`
+	NodeCheckURL string `json:"node_check_url,omitempty"`
+	NodeTimeout  int    `json:"node_timeout_ms,omitempty"`
+	SpeedEnabled *bool  `json:"speed_enabled,omitempty"`
 	Targets      string `json:"targets"`
 	Ports        string `json:"ports"`
 	SNI          string `json:"sni"`
@@ -52,6 +58,7 @@ type Observation struct {
 	Error  string  `json:"error,omitempty"`
 }
 type Result struct {
+	Node         *NodeResult   `json:"vless,omitempty"`
 	IP           string        `json:"ip"`
 	Port         int           `json:"port"`
 	Provider     string        `json:"provider"`
@@ -64,7 +71,7 @@ type Result struct {
 }
 
 func defaults() Config {
-	return Config{Ports: "443,8443", SNI: "www.cloudflare.com", VerifySNI: "one.one.one.one", Concurrency: 32, Rate: 50, Timeout: 4000, Rounds: 3, SpeedBytes: 1048576, SpeedTimeout: 10000}
+	return Config{MaxTargets: defaultMaxTargets, Mode: "cf", NodeCheckURL: "https://www.cloudflare.com/cdn-cgi/trace", NodeTimeout: 10000, Ports: "443,8443", SNI: "www.cloudflare.com", VerifySNI: "one.one.one.one", Concurrency: 32, Rate: 50, Timeout: 4000, Rounds: 3, SpeedBytes: 1048576, SpeedTimeout: 10000}
 }
 func hostname(s string) bool {
 	if len(s) > 253 || !strings.Contains(s, ".") {
@@ -83,81 +90,49 @@ func hostname(s string) bool {
 	return true
 }
 func prepare(c Config) ([]Target, error) {
-	if c.SpeedURL != "" {
+	p, e := planTargets(c)
+	if e != nil {
+		return nil, e
+	}
+	return p.expanded(), nil
+}
+func validateConfig(c Config) error {
+	mode := scanMode(c)
+	if mode != "cf" && mode != "combined" && mode != "vless" {
+		return fmt.Errorf("测试模式须为cf、combined或vless")
+	}
+	if mode != "cf" {
+		if _, e := parseNodeTemplate(c.NodeTemplate); e != nil {
+			return e
+		}
+		if !validTestURL(c.NodeCheckURL) {
+			return fmt.Errorf("VLESS真连接地址须为不含凭据的有效HTTPS URL")
+		}
+		if c.NodeTimeout < 100 || c.NodeTimeout > 60000 {
+			return fmt.Errorf("VLESS单次超时需为100–60000ms")
+		}
+	}
+	if wantSpeed(c) {
 		u, e := url.Parse(c.SpeedURL)
-		if e != nil || u.Scheme != "https" || !hostname(u.Hostname()) || u.User != nil || u.Fragment != "" || (u.Port() != "" && u.Port() != "443") {
-			return nil, fmt.Errorf("测速地址需为不含用户凭据的 HTTPS 域名地址（默认443端口）")
+		if mode == "cf" && (e != nil || u.Scheme != "https" || !hostname(u.Hostname()) || u.User != nil || u.Fragment != "" || (u.Port() != "" && u.Port() != "443")) {
+			return fmt.Errorf("测速地址需为不含用户凭据的 HTTPS 域名地址（默认443端口）")
+		}
+		if mode != "cf" && !validTestURL(c.SpeedURL) {
+			return fmt.Errorf("VLESS测速地址需为有效HTTPS URL")
 		}
 		if c.SpeedBytes < 1024 || c.SpeedBytes > 32*1024*1024 || c.SpeedTimeout < 100 || c.SpeedTimeout > 60000 {
-			return nil, fmt.Errorf("测速字节数1024–33554432，超时100–60000ms")
+			return fmt.Errorf("测速字节数1024–33554432，超时100–60000ms")
 		}
 	}
-	if c.Concurrency < 1 || c.Concurrency > 512 || c.Rate < 1 || c.Rate > 2000 || c.Timeout < 100 || c.Timeout > 30000 || c.Rounds < 1 || c.Rounds > 10 {
-		return nil, fmt.Errorf("并发 1–512，速率 1–2000，超时 100–30000ms，轮数 1–10")
+	if c.Concurrency < 1 || c.Rate < 0 || c.MaxTargets < 0 || c.Timeout < 100 || c.Timeout > 30000 || c.Rounds < 1 || c.Rounds > 10 {
+		return fmt.Errorf("并发须为正整数，速率须为非负整数（0不限速），目标上限不可为负；超时100–30000ms，轮数1–10")
 	}
-	if !hostname(c.SNI) || (c.VerifySNI != "" && (!hostname(c.VerifySNI) || strings.EqualFold(c.SNI, c.VerifySNI))) {
-		return nil, fmt.Errorf("请输入有效且不同的 SNI 域名")
+	if mode != "vless" && (!hostname(c.SNI) || (c.VerifySNI != "" && (!hostname(c.VerifySNI) || strings.EqualFold(c.SNI, c.VerifySNI)))) {
+		return fmt.Errorf("请输入有效且不同的 SNI 域名")
 	}
-	ports := []int{}
-	seenPorts := map[int]bool{}
-	for _, s := range strings.Split(c.Ports, ",") {
-		p, e := strconv.Atoi(strings.TrimSpace(s))
-		if e != nil || p < 1 || p > 65535 {
-			return nil, fmt.Errorf("端口无效")
-		}
-		if !seenPorts[p] {
-			ports = append(ports, p)
-			seenPorts[p] = true
-		}
-	}
-	if len(ports) > 16 {
-		return nil, fmt.Errorf("最多16个端口")
-	}
-	out := []Target{}
-	seen := map[netip.Addr]bool{}
-	add := func(a netip.Addr) error {
-		a = a.Unmap()
-		if seen[a] {
-			return nil
-		}
-		if len(out)+len(ports) > 100000 {
-			return fmt.Errorf("最多100000个 IP:端口，请缩小网段")
-		}
-		seen[a] = true
-		for _, p := range ports {
-			out = append(out, Target{a.String(), p})
-		}
-		return nil
-	}
-	for _, line := range strings.Split(c.Targets, "\n") {
-		line = strings.SplitN(line, "#", 2)[0]
-		for _, s := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' }) {
-			if a, e := netip.ParseAddr(s); e == nil {
-				if e = add(a); e != nil {
-					return nil, e
-				}
-				continue
-			}
-			p, e := netip.ParsePrefix(s)
-			if e != nil {
-				return nil, fmt.Errorf("无效IP/CIDR：%s", s)
-			}
-			p = p.Masked()
-			if p.Addr().BitLen()-p.Bits() > 16 {
-				return nil, fmt.Errorf("单个网段最多65536地址")
-			}
-			for a := p.Addr(); p.Contains(a); a = a.Next() {
-				if e = add(a); e != nil {
-					return nil, e
-				}
-			}
-		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("请提供云厂商 IP 或 CIDR")
-	}
-	return out, nil
+	return nil
 }
+
 func observe(ctx context.Context, t Target, sni string, c Config) Observation {
 	return observeWithDial(ctx, t, sni, c, (&net.Dialer{}).DialContext)
 }
@@ -239,20 +214,56 @@ func observeWithDial(ctx context.Context, t Target, sni string, c Config, dial f
 	return
 }
 func scan(ctx context.Context, c Config, targets []Target, emit func(Result)) {
+	scanWithNodeChecks(ctx, c, targets, emit, probeNode, measureNodeSpeed)
+}
+func scanWithNodeChecks(ctx context.Context, c Config, targets []Target, emit func(Result), check func(context.Context, Config, Target, *nodeTemplate) NodeObservation, download func(context.Context, Config, Target, *nodeTemplate) SpeedResult) {
+	scanSource(ctx, c, len(targets), func(yield func(Target) bool) {
+		for _, t := range targets {
+			if !yield(t) {
+				return
+			}
+		}
+	}, emit, check, download)
+}
+func scanTargetPlan(ctx context.Context, c Config, plan *targetPlan, seen map[string]bool, emit func(Result)) {
+	scanSource(ctx, c, max(0, plan.Count-len(seen)), func(yield func(Target) bool) {
+		plan.each(func(t Target) bool {
+			if ctx.Err() != nil {
+				return false
+			}
+			if seen[key(t.IP, t.Port)] {
+				return true
+			}
+			return yield(t)
+		})
+	}, emit, probeNode, measureNodeSpeed)
+}
+func scanSource(ctx context.Context, c Config, count int, source func(func(Target) bool), emit func(Result), check func(context.Context, Config, Target, *nodeTemplate) NodeObservation, download func(context.Context, Config, Target, *nodeTemplate) SpeedResult) {
+	if count == 0 {
+		return
+	}
+
+	mode := scanMode(c)
+	var node *nodeTemplate
+	if mode != "cf" {
+		var e error
+		node, e = parseNodeTemplate(c.NodeTemplate)
+		if e != nil {
+			return
+		}
+	}
 	queue := make(chan Target)
 	var wg sync.WaitGroup
 	var emitMu sync.Mutex
-	ticker := time.NewTicker(time.Second / time.Duration(c.Rate))
-	defer ticker.Stop()
+	limiter := newRequestPacer(c.Rate)
+	pace := func() bool { return limiter.wait(ctx) }
 	request := func(t Target, sni string) Observation {
-		select {
-		case <-ctx.Done():
+		if !pace() {
 			return Observation{SNI: sni, Error: ctx.Err().Error()}
-		case <-ticker.C:
-			return observe(ctx, t, sni, c)
 		}
+		return observe(ctx, t, sni, c)
 	}
-	for i := 0; i < c.Concurrency; i++ {
+	for i := 0; i < min(c.Concurrency, count); i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -260,43 +271,64 @@ func scan(ctx context.Context, c Config, targets []Target, emit func(Result)) {
 				r := Result{IP: t.IP, Port: t.Port, Provider: c.Provider, Rounds: c.Rounds, Evidence: "none", Observations: []Observation{}}
 				times := []float64{}
 				allTrace := true
-				for j := 0; j < c.Rounds; j++ {
-					if ctx.Err() != nil {
-						break
-					}
-					o := request(t, c.SNI)
-					r.Observations = append(r.Observations, o)
-					if o.CF && o.Error == "" {
-						r.Success++
-						times = append(times, o.TTFB)
-						if r.Evidence == "none" {
-							r.Evidence = "cf_headers"
+				if mode != "vless" {
+					for j := 0; j < c.Rounds; j++ {
+						if ctx.Err() != nil {
+							break
 						}
-					}
-					allTrace = allTrace && o.Trace && o.Error == ""
-				}
-				if allTrace && r.Success == c.Rounds {
-					r.Evidence = "trace_valid"
-					if c.VerifySNI != "" {
-						o := request(t, c.VerifySNI)
+						o := request(t, c.SNI)
 						r.Observations = append(r.Observations, o)
-						if o.Trace && o.Error == "" {
-							r.Evidence = "dual_verified"
+						if o.CF && o.Error == "" {
+							r.Success++
+							times = append(times, o.TTFB)
+							if r.Evidence == "none" {
+								r.Evidence = "cf_headers"
+							}
+						}
+						allTrace = allTrace && o.Trace && o.Error == ""
+					}
+					if allTrace && r.Success == c.Rounds {
+						r.Evidence = "trace_valid"
+						if c.VerifySNI != "" {
+							o := request(t, c.VerifySNI)
+							r.Observations = append(r.Observations, o)
+							if o.Trace && o.Error == "" {
+								r.Evidence = "dual_verified"
+							}
 						}
 					}
+					if len(times) > 0 {
+						sort.Float64s(times)
+						n := len(times)
+						r.Median = times[n/2]
+						if n%2 == 0 {
+							r.Median = (times[n/2-1] + times[n/2]) / 2
+						}
+					}
+				} else {
+					r.Evidence = "not_run"
 				}
-				if len(times) > 0 {
-					sort.Float64s(times)
-					n := len(times)
-					r.Median = times[n/2]
-					if n%2 == 0 {
-						r.Median = (times[n/2-1] + times[n/2]) / 2
+				if node != nil && (mode == "vless" || r.Success > 0) && ctx.Err() == nil {
+					nr := &NodeResult{Rounds: c.Rounds, Observations: []NodeObservation{}}
+					for i := 0; i < c.Rounds; i++ {
+						if !pace() {
+							break
+						}
+						o := check(ctx, c, t, node)
+						nr.Observations = append(nr.Observations, o)
+						if o.Error == "" {
+							nr.Success++
+						}
+					}
+					nr.Median = nodeMedian(nr.Observations)
+					r.Node = nr
+					if wantSpeed(c) && nr.Success > 0 && pace() {
+						s := download(ctx, c, t, node)
+						r.Speed = &s
 					}
 				}
-				if c.SpeedURL != "" && (r.Evidence == "trace_valid" || r.Evidence == "dual_verified") && ctx.Err() == nil {
-					select {
-					case <-ctx.Done():
-					case <-ticker.C:
+				if mode == "cf" && wantSpeed(c) && (r.Evidence == "trace_valid" || r.Evidence == "dual_verified") && ctx.Err() == nil {
+					if pace() {
 						s := measureSpeed(ctx, t, c)
 						r.Speed = &s
 					}
@@ -309,14 +341,14 @@ func scan(ctx context.Context, c Config, targets []Target, emit func(Result)) {
 			}
 		}()
 	}
-loop:
-	for _, t := range targets {
+	source(func(t Target) bool {
 		select {
 		case <-ctx.Done():
-			break loop
+			return false
 		case queue <- t:
+			return true
 		}
-	}
+	})
 	close(queue)
 	wg.Wait()
 }

@@ -51,7 +51,7 @@ def main():
     (path / 'dmit-ipv6.txt').write_text('\n'.join(map(str, v6)) + '\n')
     (path / 'dmit-source.json').write_text(json.dumps(meta, indent=2) + '\n')
     snapshot = dict(meta, ipv4=list(map(str, v4)), ipv6=list(map(str, v6)))
-    (ROOT / 'combined_refactor' / 'dmit.json').write_text(json.dumps(snapshot, indent=2) + '\n')
+    (path / 'dmit-snapshot.json').write_text(json.dumps(snapshot, indent=2) + '\n')
     print(json.dumps(meta, indent=2))
 
 if __name__ == '__main__':
