@@ -1,3 +1,6 @@
 release_assets/
 results*.jsonl
 results*.csv
+ipdata-tasks/
+test-artifacts/
+__pycache__/

@@ -1,0 +1,55 @@
+{
+  "fetched_at": "2026-11-06T08:59:22.863852+00:00",
+  "asns": [
+    906,
+    32519,
+    54574
+  ],
+  "sources": [
+    {
+      "asn": 906,
+      "source": "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS906",
+      "query_starttime": "2026-10-23T00:00:00",
+      "query_endtime": "2026-11-06T00:00:00",
+      "raw_v4": 234,
+      "raw_v6": 11
+    },
+    {
+      "asn": 32519,
+      "source": "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS32519",
+      "query_starttime": "2026-10-23T00:00:00",
+      "query_endtime": "2026-11-06T00:00:00",
+      "raw_v4": 7,
+      "raw_v6": 1
+    },
+    {
+      "asn": 54574,
+      "source": "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS54574",
+      "query_starttime": "2026-10-23T00:00:00",
+      "query_endtime": "2026-11-06T00:00:00",
+      "raw_v4": 0,
+      "raw_v6": 0
+    }
+  ],
+  "query_starttime": "2026-10-23T00:00:00",
+  "query_endtime": "2026-11-06T00:00:00",
+  "raw_v4": 241,
+  "raw_v6": 12,
+  "merged_v4": 39,
+  "merged_v6": 9,
+  "v4_addresses": 83968,
+  "user_addresses": 91136,
+  "user_not_fully_covered": [
+    "43.250.104.0/22",
+    "45.88.192.0/22",
+    "103.135.248.0/21",
+    "103.175.14.0/23",
+    "103.200.114.0/23",
+    "124.108.21.0/24",
+    "154.12.176.0/21",
+    "154.12.185.0/24",
+    "154.12.186.0/23",
+    "193.110.200.0/22",
+    "205.210.208.0/22"
+  ]
+}

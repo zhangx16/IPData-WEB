@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/netip"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,16 +18,19 @@ import (
 )
 
 type Config struct {
-	Targets     string `json:"targets"`
-	Ports       string `json:"ports"`
-	SNI         string `json:"sni"`
-	VerifySNI   string `json:"verify_sni"`
-	Concurrency int    `json:"concurrency"`
-	Rate        int    `json:"rate"`
-	Timeout     int    `json:"timeout_ms"`
-	Rounds      int    `json:"rounds"`
-	Insecure    bool   `json:"insecure"`
-	Provider    string `json:"provider"`
+	Targets      string `json:"targets"`
+	Ports        string `json:"ports"`
+	SNI          string `json:"sni"`
+	VerifySNI    string `json:"verify_sni"`
+	Concurrency  int    `json:"concurrency"`
+	Rate         int    `json:"rate"`
+	Timeout      int    `json:"timeout_ms"`
+	Rounds       int    `json:"rounds"`
+	Insecure     bool   `json:"insecure"`
+	Provider     string `json:"provider"`
+	SpeedURL     string `json:"speed_url"`
+	SpeedBytes   int64  `json:"speed_bytes"`
+	SpeedTimeout int    `json:"speed_timeout_ms"`
 }
 type Target struct {
 	IP   string
@@ -56,10 +60,11 @@ type Result struct {
 	Rounds       int           `json:"rounds"`
 	Median       float64       `json:"median_ms"`
 	Observations []Observation `json:"observations"`
+	Speed        *SpeedResult  `json:"speed,omitempty"`
 }
 
 func defaults() Config {
-	return Config{Ports: "443,8443", SNI: "www.cloudflare.com", VerifySNI: "one.one.one.one", Concurrency: 32, Rate: 50, Timeout: 4000, Rounds: 3}
+	return Config{Ports: "443,8443", SNI: "www.cloudflare.com", VerifySNI: "one.one.one.one", Concurrency: 32, Rate: 50, Timeout: 4000, Rounds: 3, SpeedBytes: 1048576, SpeedTimeout: 10000}
 }
 func hostname(s string) bool {
 	if len(s) > 253 || !strings.Contains(s, ".") {
@@ -78,6 +83,15 @@ func hostname(s string) bool {
 	return true
 }
 func prepare(c Config) ([]Target, error) {
+	if c.SpeedURL != "" {
+		u, e := url.Parse(c.SpeedURL)
+		if e != nil || u.Scheme != "https" || !hostname(u.Hostname()) || u.User != nil || u.Fragment != "" || (u.Port() != "" && u.Port() != "443") {
+			return nil, fmt.Errorf("测速地址需为不含用户凭据的 HTTPS 域名地址（默认443端口）")
+		}
+		if c.SpeedBytes < 1024 || c.SpeedBytes > 32*1024*1024 || c.SpeedTimeout < 100 || c.SpeedTimeout > 60000 {
+			return nil, fmt.Errorf("测速字节数1024–33554432，超时100–60000ms")
+		}
+	}
 	if c.Concurrency < 1 || c.Concurrency > 512 || c.Rate < 1 || c.Rate > 2000 || c.Timeout < 100 || c.Timeout > 30000 || c.Rounds < 1 || c.Rounds > 10 {
 		return nil, fmt.Errorf("并发 1–512，速率 1–2000，超时 100–30000ms，轮数 1–10")
 	}
@@ -150,9 +164,34 @@ func observe(ctx context.Context, t Target, sni string, c Config) Observation {
 func observeWithDial(ctx context.Context, t Target, sni string, c Config, dial func(context.Context, string, string) (net.Conn, error)) (o Observation) {
 	o.SNI = sni
 	start := time.Now()
-	defer func() { o.Total = float64(time.Since(start).Microseconds()) / 1000 }()
+
+	var traceMu sync.Mutex
 	var tcpStart, tlsStart time.Time
-	trace := &httptrace.ClientTrace{ConnectStart: func(_, _ string) { tcpStart = time.Now() }, ConnectDone: func(_, _ string, _ error) { o.TCP = float64(time.Since(tcpStart).Microseconds()) / 1000 }, TLSHandshakeStart: func() { tlsStart = time.Now() }, TLSHandshakeDone: func(_ tls.ConnectionState, _ error) { o.TLS = float64(time.Since(tlsStart).Microseconds()) / 1000 }, GotFirstResponseByte: func() { o.TTFB = float64(time.Since(start).Microseconds()) / 1000 }}
+	var tcpMS, tlsMS, ttfbMS float64
+	defer func() {
+		traceMu.Lock()
+		o.TCP = tcpMS
+		o.TLS = tlsMS
+		o.TTFB = ttfbMS
+		traceMu.Unlock()
+		o.Total = float64(time.Since(start).Microseconds()) / 1000
+	}()
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(_, _ string) { traceMu.Lock(); tcpStart = time.Now(); traceMu.Unlock() },
+		ConnectDone: func(_, _ string, _ error) {
+			traceMu.Lock()
+			tcpMS = float64(time.Since(tcpStart).Microseconds()) / 1000
+			traceMu.Unlock()
+		},
+		TLSHandshakeStart: func() { traceMu.Lock(); tlsStart = time.Now(); traceMu.Unlock() },
+		TLSHandshakeDone: func(_ tls.ConnectionState, _ error) {
+			traceMu.Lock()
+			tlsMS = float64(time.Since(tlsStart).Microseconds()) / 1000
+			traceMu.Unlock()
+		},
+		GotFirstResponseByte: func() { traceMu.Lock(); ttfbMS = float64(time.Since(start).Microseconds()) / 1000; traceMu.Unlock() },
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(c.Timeout)*time.Millisecond)
 	defer cancel()
 	tr := &http.Transport{Proxy: nil, DisableKeepAlives: true, TLSClientConfig: &tls.Config{ServerName: sni, InsecureSkipVerify: c.Insecure, MinVersion: tls.VersionTLS12}, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -252,6 +291,14 @@ func scan(ctx context.Context, c Config, targets []Target, emit func(Result)) {
 					r.Median = times[n/2]
 					if n%2 == 0 {
 						r.Median = (times[n/2-1] + times[n/2]) / 2
+					}
+				}
+				if c.SpeedURL != "" && (r.Evidence == "trace_valid" || r.Evidence == "dual_verified") && ctx.Err() == nil {
+					select {
+					case <-ctx.Done():
+					case <-ticker.C:
+						s := measureSpeed(ctx, t, c)
+						r.Speed = &s
 					}
 				}
 				if ctx.Err() == nil {
